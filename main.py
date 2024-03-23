@@ -1,96 +1,123 @@
 import mimetypes
-import pathlib
-import urllib.parse
-import multiprocessing
+import socket
+import logging
+from datetime import datetime
+from urllib.parse import urlparse, unquote_plus
+from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from server import Server
+from threading import Thread
 
-class HttpHandler(BaseHTTPRequestHandler):
-    def __init__(self, logger):
-        self.logger = logger
+from pymongo.mongo_client import MongoClient
 
-    async def do_POST(self):
-        data = await self.rfile.read(int(self.headers["Content-Length"]))
-        self.logger.info(
-            f"POST request: Path: {self.path}; Headers: {self.headers}; Body: {data.decode()}"
-        )
-        data_parse = urllib.parse.unquote_plus(data.decode())
-        self.logger.info(
-            f"POST request: Path: {self.path}; Headers: {self.headers}; Body: {data_parse}"
-        )
-        data_dict = {
-            key: value for key, value in [el.split("=") for el in data_parse.split("&")]
-        }
-        await self.send_response(302)
-        await self.send_header("Location", "/")
-        await self.end_headers()
 
-    async def do_GET(self):
-        pr_url = urllib.parse.urlparse(self.path)
-        self.logger.info(
-            f"GET request: Path: {self.path}; Headers: {self.headers}; Query: {pr_url.query}"
-        )
-        if pr_url.path == "/":
-            self.logger.info(f"GET request: index: {pr_url}")
-            await self.send_html_file("index.html")
-        elif pr_url.path == "/contact":
-            self.logger.info(f"GET request: contact: {pr_url}")
-            await self.send_html_file("contact.html")
+BASE_DIRECTORY = Path(__file__).parent
+
+
+MONGODB_URI = "mongodb://mongodb:27017"
+BUFFER_SIZE = 1024
+HTTP_PORT = 3000
+HTTP_HOST = '0.0.0.0'
+SOCKET_HOST = '127.0.0.1'
+SOCKET_PORT = 5000
+
+
+def send_socket_message(message):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.connect((SOCKET_HOST, SOCKET_PORT))
+        sock.send(message.encode('utf-8'))
+
+
+class WebHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        parsed_path = urlparse(self.path).path
+        if parsed_path == "/":
+            self.send_html_response("index.html")
+        elif parsed_path == "#":
+            self.send_html_response("index.html")
+        elif parsed_path == "/message":
+            self.send_html_response("message.html")
         else:
-            if pathlib.Path().joinpath(pr_url.path[1:]).exists():
-                await self.send_static()
+            requested_file = BASE_DIRECTORY.joinpath(parsed_path[1:])
+            if requested_file.exists():
+                self.send_static_response(requested_file)
             else:
-                self.logger.info(f"GET request: URL error: {pr_url}")
-                await self.send_html_file("error.html", 404)
+                self.send_html_response("error.html", 404)
 
-    async def send_html_file(self, filename, status=200):
-        await self.send_response(status)
-        await self.send_header("Content-type", "text/html")
-        await self.end_headers()
-        async with open(filename, "rb") as fd:
-            await self.wfile.write(fd.read())
+    def do_POST(self):
+        content_length = int(self.headers.get("Content-Length"))
+        post_data = self.rfile.read(content_length).decode()
+        logging.info(unquote_plus(post_data))
+        send_socket_message(post_data)
+        self.send_response(302)
+        self.send_header("Location", "/")
+        self.end_headers()
 
-    async def send_static(self):
-        await self.send_response(200)
-        mt = mimetypes.guess_type(self.path)
-        if mt:
-            await self.send_header("Content-type", mt[0])
-        else:
-            await self.send_header("Content-type", "text/plain")
-        await self.end_headers()
-        async with open(f".{self.path}", "rb") as file:
-            await self.wfile.write(file.read())
+    def send_html_response(self, filename, status=200):
+        self.send_response(status)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        with open(filename, "rb") as file:
+            self.wfile.write(file.read())
 
-async def run_http_server(server_class=HTTPServer, handler_class=HttpHandler):
-    server_address = ("localhost", 3000)
-    http = server_class(server_address, handler_class)
+    def send_static_response(self, filename, status=200):
+        self.send_response(status)
+        mimetype = mimetypes.guess_type(filename)[0] if mimetypes.guess_type(filename)[0] else "text/plain"
+        self.send_header("Content-type", mimetype)
+        self.end_headers()
+        with open(filename, "rb") as file:
+            self.wfile.write(file.read())
+
+
+def save_to_database(data):
+    client = MongoClient(MONGODB_URI)
+    db = client.homework
+    parsed_data = unquote_plus(data.decode())
     try:
-        http.serve_forever()
-    except KeyboardInterrupt:
-        http.server_close()
+        parsed_data = {key: value for key, value in [el.split("=") for el in parsed_data.split("&")]}
+        parsed_data['date'] = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')
+        logging.info(f'Parsed data: {parsed_data}')
+        db.messages.insert_one(parsed_data)
+    except ValueError as e:
+        logging.error(f"Parse error: {e}")
+    except Exception as e:
+        logging.error(f"Failed to save: {e}")
+    finally:
+        client.close()
 
-async def run_server(logger, server_class=HTTPServer, handler_class=HttpHandler):
-    server = Server(logger)
-    async with websockets.serve(server.ws_handler, "localhost", 5000):
-        try:
-            await asyncio.Future()
-        except KeyboardInterrupt:
-            server.unregister()
-    asyncio.run(serve())
 
-async def start_http_server():
-    await run_http_server()
+def run_http_server():
+    http_server = HTTPServer((HTTP_HOST, HTTP_PORT), WebHandler)
+    try:
+        logging.info(f"HTTP server started on http://{HTTP_HOST}:{HTTP_PORT}")
+        http_server.serve_forever()
+    except Exception as e:
+        logging.error(f"HTTP server error: {e}")
+    finally:
+        logging.info("HTTP server stopped")
+        http_server.server_close()
 
-async def start_socket_server():
-    await run_server()
+
+def run_socket_server():
+    socket_server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    socket_server.bind((SOCKET_HOST, SOCKET_PORT))
+    logging.info(f"Socket server started on socket://{SOCKET_HOST}:{SOCKET_PORT}")
+    try:
+        while True:
+            data, address = socket_server.recvfrom(BUFFER_SIZE)
+            logging.info(f"Received message from {address}: {data.decode()}")
+            save_to_database(data)
+    except Exception as e:
+        logging.error(f"Socket server error: {e}")
+    finally:
+        logging.info("Socket server stopped")
+        socket_server.close()
 
 
 if __name__ == "__main__":
-    http_server_process = multiprocessing.Process(target=start_http_server)
-    http_server_process.start()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(threadName)s - %(message)s")
+    http_thread = Thread(target=run_http_server, name="http_server_thread")
+    http_thread.start()
 
-    socket_server = multiprocessing.Process(target=start_socket_server)
-    socket_server.start()
-
-    http_server_process.join()
-    socket_server.join()
+    socket_thread = Thread(target=run_socket_server, name="socket_server_thread")
+    socket_thread.start()
