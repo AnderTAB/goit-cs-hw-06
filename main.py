@@ -5,7 +5,8 @@ from datetime import datetime
 from urllib.parse import urlparse, unquote_plus
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread
+# from threading import Thread
+from multiprocessing import Process
 
 from pymongo.mongo_client import MongoClient
 
@@ -70,21 +71,38 @@ class WebHandler(BaseHTTPRequestHandler):
 
 
 def save_to_database(data):
+    # client = MongoClient(MONGODB_URI)
+    # db = client.homework
+    # parsed_data = unquote_plus(data.decode())
+    # try:
+    #     parsed_data = {key: value for key, value in [el.split("=") for el in parsed_data.split("&")]}
+    #     parsed_data['date'] = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')
+    #     logging.info(f'Parsed data: {parsed_data}')
+    #     db.messages.insert_one(parsed_data)
+    # except ValueError as e:
+    #     logging.error(f"Parse error: {e}")
+    # except Exception as e:
+    #     logging.error(f"Failed to save: {e}")
+    # finally:
+    #     client.close()
     client = MongoClient(MONGODB_URI)
-    db = client.homework
-    parsed_data = unquote_plus(data.decode())
+    db = client.final_home_work
+    parse_data = unquote_plus(data.decode())
+    current_time = datetime.now()
+    collected_data = {"date": current_time}
     try:
-        parsed_data = {key: value for key, value in [el.split("=") for el in parsed_data.split("&")]}
-        parsed_data['date'] = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')
-        logging.info(f'Parsed data: {parsed_data}')
-        db.messages.insert_one(parsed_data)
+        pass
+        parse_data = {key: value for key, value in
+                      [el.split("=") for el in parse_data.split("&")]}
+        collected_data.update(parse_data)
+        print(collected_data)
+        db.messages.insert_one(collected_data)
     except ValueError as e:
         logging.error(f"Parse error: {e}")
     except Exception as e:
         logging.error(f"Failed to save: {e}")
     finally:
         client.close()
-
 
 def run_http_server():
     http_server = HTTPServer((HTTP_HOST, HTTP_PORT), WebHandler)
@@ -115,9 +133,13 @@ def run_socket_server():
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(threadName)s - %(message)s")
-    http_thread = Thread(target=run_http_server, name="http_server_thread")
-    http_thread.start()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(procesName)s - %(message)s")
+    http_proces = Process(target=run_http_server, name="http_server_proces")
+    http_proces.start()
 
-    socket_thread = Thread(target=run_socket_server, name="socket_server_thread")
-    socket_thread.start()
+    socket_proces = Process(target=run_socket_server, name="socket_server_proces")
+    socket_proces.start()
+
+
+    http_proces.join()
+    socket_proces.join()
